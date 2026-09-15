@@ -5533,14 +5533,14 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
         // ===== 炮火打击(呼叫远程炮击准星位置,只伤敌)=====
         let artyCooldown = 0;
         const ARTY_COOLDOWN = 60;
-        const ARTY_SHELLS = 14;       // 一轮发数
-        const ARTY_DURATION = 4.5;    // 持续秒数
-        const ARTY_SPREAD = 20;       // 散布半径
-        const ARTY_KILL_R = 14;       // 单发杀伤半径
-        const ARTY_DMG = 450;         // 单发中心伤害
+        const ARTY_SHELLS = 10;       // 一轮火箭弹数
+        const ARTY_DURATION = 3.0;    // 持续秒数
+        const ARTY_SPREAD = 12;       // 散布半径(收紧,确保能砸到)
+        const ARTY_KILL_R = 6;        // 单发杀伤半径
+        const ARTY_DMG = 40;          // 单发伤害(10 × 40 = 400)
         const ARTY_RANGE = 160;       // "附近"判定半径
         const ARTY_FALL_H = 130;      // 炮弹出现高度
-        const ARTY_FALL_V = 68;       // 下落速度
+        const ARTY_FALL_V = 95;       // 下落速度(火箭弹,更快)
         let artyStrikes = [];
         // ===== 地图网格(A~J × 1~10,每格 30 米)=====
         const ARTY_GRID_SIZE = 44;   // 地图 440 米 / 10 格
@@ -5904,7 +5904,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                 let tg = { x: _tx, z: _tz };
                 artyTarget = { x: _tx, z: _tz, li: _li, ni: _ni, code: _code };   // 小地图标出
                 artyCooldown = ARTY_COOLDOWN;
-                showKillMessage('📡 炮火支援已呼叫!目标格 ' + _code, false, true);
+                showKillMessage('🚀 火箭弹幕来袭!目标格 ' + _code, false, true);
 
                 // 乘员播报:请求 → 坐标 → 收到 → 开火(与其他音效共存)
                 playVoice('v_arty_req_' + (1 + Math.floor(Math.random() * 4)), 0);
