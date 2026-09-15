@@ -6160,7 +6160,9 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                 camera.position.y = Math.max(turretPos.y + 8, getTerrainHeight(camera.position.x, camera.position.z) + 2);
                 camera.lookAt(turretPos);
 
-                if (player.turretVelocity.lengthSq() === 0 && player.isDestroyed) {
+                // 复活条件:炮塔停稳【或】已等 2.5 秒(原来用 ===0,浮点数永远到不了 → 卡死)
+                player._deadTime = (player._deadTime || 0) + dt;
+                if ((player.turretVelocity.lengthSq() < 0.05 || player._deadTime > 2.5) && player.isDestroyed) {
                     // 消耗复活次数(只算一次)
                     if (!player._lifeCounted) {
                         player._lifeCounted = true;
