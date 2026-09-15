@@ -5574,6 +5574,8 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
         const PLANE_SPEED = 45;
         const PLANE_TURN_RATE = 1.0;    // 飞行教官:最大偏航角速度 rad/s
         const PLANE_PITCH_RATE = 0.7;   // 最大俯仰角速度
+        const PLANE_ROCKETS = 16;       // 火箭弹总携带量(打完就没了)
+        const PLANE_FLIGHT_TIME = 60;   // 滞空时间(秒)
         let planeUnlocked = false;
         let isFlying = false;
         let plane = null;
@@ -5599,6 +5601,20 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
         }
 
         // 飞行 UI 切换:隐藏摇杆 / 强制显示武器键 / 收放机炮准心
+        // 统一离机(手动/坠毁/超时都用它)
+        function leavePlane(msg) {
+            try {
+                isFlying = false;
+                if (plane && plane.mesh) scene.remove(plane.mesh);
+                plane = null;
+                if (player && player.mesh) player.mesh.visible = true;
+                stopPlaneEngine();
+                setFlightUI(false);
+                planeUnlocked = false;          // 用完想再叫 → 重新杀 5 个
+                if (msg) showKillMessage(msg, false, true);
+            } catch (e) {}
+        }
+
         function setFlightUI(on) {
             try {
                 let _je = document.getElementById('joystick-area');
@@ -5657,6 +5673,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                     let bz = player.mesh ? player.mesh.position.z : 0;
                     plane.mesh.position.set(bx + 12, getTerrainHeight(bx, bz) + 95, bz);
                     plane.yaw = cameraYaw; plane.pitch = 0; plane.roll = 0; plane.hp = plane.maxHp;
+                    plane.rockets = PLANE_ROCKETS; plane.timeLeft = PLANE_FLIGHT_TIME; plane._warn = 0;
                     scene.add(plane.mesh);
                     if (player.mesh) player.mesh.visible = false;
                     startPlaneEngine();
@@ -5664,14 +5681,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                     playVoice('v_air_inbound_' + (1 + Math.floor(Math.random() * 3)), 0);
                     showKillMessage('✈️ 苏-25 已进场!火键=航炮 / 导弹键=火箭弹', false, true);
                 } else {
-                    isFlying = false;
-                    if (plane && plane.mesh) scene.remove(plane.mesh);
-                    plane = null;                       // 下次进场重新造
-                    if (player.mesh) player.mesh.visible = true;
-                    stopPlaneEngine();
-                    setFlightUI(false);
-                    planeUnlocked = false;              // 用完需再杀 5 个才能再叫
-                    showKillMessage('已返回坦克(再击杀 ' + PLANE_UNLOCK_KILLS + ' 个可再次呼叫)', false, true);
+                    leavePlane('已返回坦克(再击杀 ' + PLANE_UNLOCK_KILLS + ' 个可再次呼叫)');
                 }
             } catch (e) { console.warn('plane toggle failed', e); }
         }
@@ -5695,6 +5705,16 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             let _mp = PLANE_PITCH_RATE * dt;
             plane.pitch += Math.max(-_mp, Math.min(_mp, _dP));
             plane.pitch = Math.max(-0.8, Math.min(0.8, plane.pitch));
+
+            // 滞空倒计时
+            plane.timeLeft -= dt;
+            if (plane.timeLeft <= 10.5 && plane._warn !== 1) { plane._warn = 1; showKillMessage('⛽ 苏-25 燃油告急(10 秒)!', false, true); }
+            if (plane.timeLeft <= 0) { leavePlane('⛽ 苏-25 燃油耗尽,自动返航'); return; }
+            try {
+                let _mm = document.getElementById('m-ammo-missile-m'); if (_mm) _mm.innerText = plane.rockets;
+                let _um = document.getElementById('ui-ammo-missile'); if (_um) _um.innerText = plane.rockets;
+                let _mn = document.getElementById('ui-name-missile'); if (_mn) _mn.textContent = '火箭弹 ×' + plane.rockets + ' · 油 ' + Math.max(0, Math.ceil(plane.timeLeft)) + 's';
+            } catch (e) {}
 
             let cp = Math.cos(plane.pitch);
             let p = plane.mesh.position;
@@ -5753,10 +5773,12 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             }
             // 火箭弹(不制导)
             plane.rockCd -= dt;
-            if (mouse.rightDown && plane.rockCd <= 0) {
+            if (mouse.rightDown && plane.rockCd <= 0 && plane.rockets > 0) {
                 plane.rockCd = 0.34;
+                let _n = Math.min(2, plane.rockets);
+                plane.rockets -= _n;
                 let dir = new THREE.Vector3(bx * cp, Math.sin(plane.pitch), bz * cp).normalize();
-                for (let sx of [-3.4, 3.4]) {
+                for (let sx of (_n >= 2 ? [-3.4, 3.4] : [-3.4])) {
                     let sp = p.clone();
                     sp.x += bz * sx; sp.z -= bx * sx; sp.y -= 0.9;
                     sp.add(dir.clone().multiplyScalar(3));
@@ -5777,13 +5799,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                 SoundManager.playExplosion(p.clone(), true);
                 createExplosion(p.clone(), 16);
                 showKillMessage('✈️ 苏-25 被击落!已返回坦克', false, true);
-                isFlying = false;
-                scene.remove(plane.mesh);
-                plane = null;
-                if (player.mesh) player.mesh.visible = true;
-                stopPlaneEngine();
-                setFlightUI(false);                 // ★ 坠毁也要把摇杆还回来
-                planeUnlocked = false;              // 被击落也需重新解锁
+                leavePlane('✈️ 苏-25 被击落!已返回坦克');
             }
         }
 
