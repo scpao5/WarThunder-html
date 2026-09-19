@@ -5950,21 +5950,29 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             } else heli._collLock = false;
             // ---- 输入:摇杆 ----
             let yawIn = (typeof analogTurn === 'number' ? analogTurn : 0);
-            let collIn = -(typeof analogMove === 'number' ? analogMove : 0);
+            // ★ 修复:总距不再抢摇杆上下(摇杆上下=前进/后退),改用 Shift/Ctrl 或总距按钮
+            let collIn = 0;
+            if (keys.shift) collIn += 1; if (keys.control) collIn -= 1;
+            if (heli._collUp) collIn += 1; if (heli._collDown) collIn -= 1;
             if (keys.a) yawIn -= 1; if (keys.d) yawIn += 1;
-            if (keys.w) collIn += 1; if (keys.s) collIn -= 1;
             if (!heli._collLock) heli.collective = Math.max(0, Math.min(1, heli.collective + collIn * HELI_COLL_RATE * dt));
             heli.yaw += yawIn * 1.1 * dt;
 
             // ---- 物理:升力(本地 Y 轴)× 机体朝向 ----
+            // ★ 修复:俯仰由摇杆上下控制(之前 pitch 永远是 0 → 没有任何水平推力)
+            let pitchIn = -(typeof analogMove === 'number' ? analogMove : 0);
+            if (keys.w) pitchIn += 1; if (keys.s) pitchIn -= 1;
+            heli.pitch += pitchIn * 0.9 * dt;
+            heli.pitch = Math.max(-0.55, Math.min(0.55, heli.pitch));
+            // ★ 修复:不推俯仰时自动回正(悬停感)
+            if (Math.abs(pitchIn) < 0.01) heli.pitch *= Math.max(0, 1 - 2.0 * dt);
+
             let cp = Math.cos(heli.pitch), sp = Math.sin(heli.pitch);
             let lift = heli.collective * HELI_MAX_LIFT;
-            // 机体 Y 轴在世界系的方向(带俯仰/滚转)
-            let ux = -sp * Math.cos(heli.roll) * 0 + 0;
             let ay = (lift / HELI_MASS) - HELI_GRAV;
-            // 俯仰 → 前向推力分量
-            let fx = Math.sin(heli.yaw) * sp * (lift / HELI_MASS);
-            let fz = Math.cos(heli.yaw) * sp * (lift / HELI_MASS);
+            // ★ 修复:低头(sp<0)→ 向前飞;抬头 → 向后(这才是直升机的推力来源)
+            let fx = Math.sin(heli.yaw) * (-sp) * (lift / HELI_MASS);
+            let fz = Math.cos(heli.yaw) * (-sp) * (lift / HELI_MASS);
             heli.vy += ay * dt;
             heli.vx += fx * dt;
             heli.vz += fz * dt;
