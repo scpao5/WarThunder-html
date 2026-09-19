@@ -5820,7 +5820,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             heli = null;
             if (player && player.mesh) player.mesh.visible = true;
             stopHeliEngine();
-            setFlightUI(false);
+            setFlightUI(false, true);
             hoverMode = false; hoverBlend = 0;
             let _hb2 = document.getElementById('btn-hover'); if (_hb2) _hb2.style.display = 'none';
             let _jk = document.getElementById('joystick-knob'); if (_jk) { _jk.style.left = '40px'; _jk.style.top = '40px'; }
@@ -6095,10 +6095,10 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             } catch (e) {}
         }
 
-        function setFlightUI(on) {
+        function setFlightUI(on, keepJoystick) {
             try {
                 let _je = document.getElementById('joystick-area');
-                if (_je) _je.style.display = on ? 'none' : '';
+                if (_je) _je.style.display = (on && !keepJoystick) ? 'none' : '';   // 武直保留摇杆
                 let _gr = document.getElementById('gun-reticle');
                 if (_gr) _gr.style.display = 'none';
                 let _mb = document.getElementById('btn-missile');
@@ -6151,8 +6151,12 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                     if (Math.random() < 0.5) {          // ★ 50% 出武直
                         isHeli = true;
                         spawnHeli();
-                        setFlightUI(true);
+                        setFlightUI(true, true);      // ★ 武直保留移动摇杆
                         // 武直:保留摇杆(左杆=飞行,松手=自动悬停)
+                        let _je2 = document.getElementById('joystick-area');
+                        if (_je2) _je2.style.display = '';
+                        let _jk2 = document.getElementById('joystick-knob');
+                        if (_jk2) { _jk2.style.left = '40px'; _jk2.style.top = '40px'; }
                         playVoice('v_air_inbound_' + (1 + Math.floor(Math.random() * 3)), 0);
                         return;
                     }
