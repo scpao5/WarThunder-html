@@ -2611,7 +2611,7 @@
             bindBtn('btn-unjam', () => { tryUnjam(); });
             bindBtn('btn-arty', () => { callArtillery(); });
             bindBtn('btn-plane', () => { togglePlane(); });
-            bindBtn('btn-hover', () => { toggleHover(); });
+            bindBtn('btn-hover', () => { HeliVehicle.toggleHover(); });
             bindBtn('btn-coll-up',   () => { if (heli) heli._collUp = true; },   () => { if (heli) heli._collUp = false; });
             bindBtn('btn-coll-down', () => { if (heli) heli._collDown = true; }, () => { if (heli) heli._collDown = false; });
         }
@@ -3839,7 +3839,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
 
             update(dt) {
                 if (typeof isFlying !== 'undefined' && isFlying) {
-                    if (isHeli) { if (!heli) { leaveHeli(null); } else { updateHeli(dt); return; } }   // 🚁 武直
+                    if (HeliVehicle.isActive()) { HeliVehicle.update(dt); return; }   // 🚁 武直
                     else if (!plane) { isFlying = false; if (this.mesh) this.mesh.visible = true; }   // 自愈
                     else { updateFlight(dt); return; }                                                // ✈️ 苏-25
                 }
@@ -5642,429 +5642,647 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
         let heliEngSrc = null, heliEngGain = null;
         let hoverMode = false, hoverBlend = 0, autoHover = true, hoverManual = false;
         const _hitCalled = new Set();   // 已播报过"命中"的目标(每个目标只播一次)
-        function toggleHover() {
-            if (!isHeli) return;
-            hoverManual = !hoverManual;
-            hoverMode = hoverManual ? true : autoHover;
-            let b = document.getElementById('btn-hover');
-            if (b) b.style.background = hoverManual ? 'rgba(168,255,214,0.6)' : (hoverMode ? 'rgba(168,255,214,0.35)' : '');
-            showKillMessage(hoverManual ? '悬停锁定:开(强制悬停)' : '悬停锁定:关(松手自动悬停)', false, true);
-        }
 
-        // ================= 武直(模型搬自 helicopter1.0) =================
+        /* ===================================================================
+           武直 —— 从 helicopter1.0 干净移植
+           自包含模块,不污染全局,不依赖 isHeli 全局态
+           =================================================================== */
+        const HeliVehicle = (function () {
+          'use strict';
 
-        function buildHeli() {
-            const helicopter = new THREE.Group();
-            const matBody   = new THREE.MeshStandardMaterial({ color: 0x3f5d47, roughness: 0.55, metalness: 0.35 });
-            const matDark   = new THREE.MeshStandardMaterial({ color: 0x23272c, roughness: 0.75, metalness: 0.45 });
-            const matGlass  = new THREE.MeshStandardMaterial({ color: 0x9fd8f5, roughness: 0.08, metalness: 0.15, transparent: true, opacity: 0.42 });
-            const matAccent = new THREE.MeshStandardMaterial({ color: 0xc8d63a, roughness: 0.5, metalness: 0.3 });
-            const matBlade  = new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.85, metalness: 0.2 });
-            const matMuzzle = new THREE.MeshStandardMaterial({ color: 0xc8d63a, roughness: 0.5, metalness: 0.3, emissive: 0x000000 });
+          /* ---------------- 物理常量(项目一) ---------------- */
+          const MASS = 5000, MAX_LIFT = 90000, G = 9.8;
+          const AIR_DRAG = 0.20, VERT_DAMP = 0.50;
+          const HOVER_COLL = MASS * G / MAX_LIFT;          // ≈ 0.544
 
+          const COLL_RATE = 0.75, COLL_MIN = 0, COLL_MAX = 1;
+          const CTRL_PRESS = 6.0;
 
-            const fuselage = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.15, 6.0, 20, 1), matBody);
-            fuselage.rotation.x = Math.PI / 2;
-            helicopter.add(fuselage);
+          const PITCH_MAN_RATE = 1.6, PITCH_FOLLOW = 2.0, MAX_PITCH_RATE = 0.6;
+          const YAW_RATE = 1.5, YAW_FOLLOW = 2.0, MAX_YAW_RATE = 3.0;
+          const ROLL_FOLLOW = 2.5, ROLL_DAMP = 2.5, MAX_ROLL_RATE = 3.0;
+          const MAX_BANK = Math.PI / 4, BANK_GAIN = 0.8, TURN_PER_SIN = 0.6;
 
-            const nose = new THREE.Mesh(new THREE.SphereGeometry(1.0, 20, 14), matGlass);
+          const PITCH_LIM_DOWN = Math.PI * 80 / 180;
+          const PITCH_LIM_UP   = Math.PI * 0.4;
+          const GROUND_CLEAR   = 1.60;
+          const TWO_PI         = Math.PI * 2;
+
+          const HOVER_BLEND_RATE = 3.0, HOVER_COLL_DAMP = 2.5;
+          const HOVER_INPUT_DAMP = 0.15, HOVER_ROLL_DAMP = 0.25;
+
+          const DUST_H = 15, DUST_RATE = 90, DUST_LIFE = 2.5, DUST_SPREAD = 3.5;
+
+          const ROCKET_SPEED = 160, ROCKET_DMG = 380;
+          const ROCKET_PAIR_GAP = 0.20, ROCKET_CD = 0.6;
+          const ROCKET_LAUNCH = [
+            new THREE.Vector3( 2.1, -0.42, 1.2),
+            new THREE.Vector3(-2.1, -0.42, 1.2),
+          ];
+
+          const CAM_FOLLOW = 3.0;
+          const TIME_LIMIT = 75, ROCKETS_TOTAL = 24;
+
+          /* ---------------- 数学工具 ---------------- */
+          const clamp = (v, lo, hi) => v < lo ? lo : v > hi ? hi : v;
+          const wrap = a => {
+            a = a % TWO_PI;
+            if (a >  Math.PI) a -= TWO_PI;
+            if (a < -Math.PI) a += TWO_PI;
+            return a;
+          };
+
+          /* ---------------- 状态 ---------------- */
+          const S = {
+            active: false,
+            mesh: null, rotorMain: null, rotorTail: null,
+            pos: new THREE.Vector3(), vel: new THREE.Vector3(),
+            yaw: 0, pitch: 0, roll: 0,
+            yawVel: 0, pitchVel: 0, rollVel: 0,
+            targetYaw: 0, targetPitch: 0,
+            collective: HOVER_COLL,
+            camYaw: 0,
+            grounded: false,
+            hoverMode: false, hoverBlend: 0,
+            timeLeft: TIME_LIMIT, rockets: ROCKETS_TOTAL,
+            rocketCd: 0, rocketQueue: [],
+            dustParticles: [], dustAccum: 0,
+            warning: false,
+          };
+
+          /* ---------------- 临时对象 ---------------- */
+          const _eul   = new THREE.Euler(0, 0, 0, 'YXZ');
+          const _q     = new THREE.Quaternion();
+          const _zAxis = new THREE.Vector3(0, 0, 1);
+          const _localT  = new THREE.Vector3();
+          const _worldT  = new THREE.Vector3();
+          const _gravF   = new THREE.Vector3();
+          const _totF    = new THREE.Vector3();
+          const _acc     = new THREE.Vector3();
+          const _camQ    = new THREE.Quaternion();
+          const _camEul  = new THREE.Euler(0, 0, 0, 'YXZ');
+          const _camOff  = new THREE.Vector3();
+          const _camLook = new THREE.Vector3();
+          const _visual  = new THREE.Vector3();
+          const _aimEul  = new THREE.Euler(0, 0, 0, 'YXZ');
+          const _aimQ    = new THREE.Quaternion();
+
+          /* =================================================================
+             建模 —— 从 buildHeli 干净重写
+             ================================================================= */
+          function buildMesh() {
+            const g = new THREE.Group();
+            const mBody   = new THREE.MeshStandardMaterial({ color: 0x3f5d47, roughness: 0.55, metalness: 0.35 });
+            const mDark   = new THREE.MeshStandardMaterial({ color: 0x23272c, roughness: 0.75, metalness: 0.45 });
+            const mGlass  = new THREE.MeshStandardMaterial({ color: 0x9fd8f5, roughness: 0.08, metalness: 0.15, transparent: true, opacity: 0.42 });
+            const mAccent = new THREE.MeshStandardMaterial({ color: 0xc8d63a, roughness: 0.5, metalness: 0.3 });
+            const mBlade  = new THREE.MeshStandardMaterial({ color: 0x2a2e33, roughness: 0.85, metalness: 0.2 });
+
+            const fus = new THREE.Mesh(new THREE.CylinderGeometry(1.0, 1.15, 6.0, 20, 1), mBody);
+            fus.rotation.x = Math.PI / 2;
+            g.add(fus);
+
+            const nose = new THREE.Mesh(new THREE.SphereGeometry(1.0, 20, 14), mGlass);
             nose.scale.set(1.0, 0.86, 1.3);
             nose.position.set(0, 0.05, 3.0);
-            helicopter.add(nose);
+            g.add(nose);
 
-            const chin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.2), matDark);
+            const chin = new THREE.Mesh(new THREE.BoxGeometry(1.2, 0.4, 1.2), mDark);
             chin.position.set(0, -0.72, 3.05);
-            helicopter.add(chin);
+            g.add(chin);
 
-            const sensor = new THREE.Mesh(new THREE.SphereGeometry(0.28, 12, 10), matDark);
-            sensor.position.set(0, -0.95, 3.35);
-            helicopter.add(sensor);
+            const boom = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.34, 5.2, 14, 1), mBody);
+            boom.rotation.x = Math.PI / 2;
+            boom.position.set(0, 0.45, -5.5);
+            g.add(boom);
 
-            const frameBar = new THREE.Mesh(new THREE.BoxGeometry(2.02, 0.1, 0.12), matDark);
-            frameBar.position.set(0, 0.55, 3.35);
-            helicopter.add(frameBar);
-
-            const tailBoom = new THREE.Mesh(new THREE.CylinderGeometry(0.5, 0.34, 5.2, 14, 1), matBody);
-            tailBoom.rotation.x = Math.PI / 2;
-            tailBoom.position.set(0, 0.45, -5.5);
-            helicopter.add(tailBoom);
-
-            const fin = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.5, 1.15), matBody);
+            const fin = new THREE.Mesh(new THREE.BoxGeometry(0.16, 1.5, 1.15), mBody);
             fin.position.set(0, 1.2, -7.55);
             fin.rotation.x = -0.28;
-            helicopter.add(fin);
+            g.add(fin);
 
-            const finTip = new THREE.Mesh(new THREE.BoxGeometry(0.2, 0.35, 0.9), matAccent);
-            finTip.position.set(0, 1.95, -7.8);
-            finTip.rotation.x = -0.28;
-            helicopter.add(finTip);
-
-            const hStab = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.1, 0.75), matBody);
+            const hStab = new THREE.Mesh(new THREE.BoxGeometry(2.3, 0.1, 0.75), mBody);
             hStab.position.set(0, 0.52, -6.6);
-            helicopter.add(hStab);
+            g.add(hStab);
 
-            const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.25, 12), matDark);
+            const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 1.25, 12), mDark);
             mast.position.set(0, 1.5, 0.4);
-            helicopter.add(mast);
-
-            const mastBase = new THREE.Mesh(new THREE.CylinderGeometry(0.45, 0.6, 0.35, 14), matDark);
-            mastBase.position.set(0, 0.98, 0.4);
-            helicopter.add(mastBase);
+            g.add(mast);
 
             const rotorMain = new THREE.Group();
             rotorMain.position.set(0, 2.1, 0.4);
-            helicopter.add(rotorMain);
+            rotorMain.add(new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.24, 16), mDark));
+            for (let i = 0; i < 4; i++) {
+              const pv = new THREE.Group();
+              pv.rotation.y = (i / 4) * Math.PI * 2;
+              const bl = new THREE.Mesh(new THREE.BoxGeometry(6.0, 0.07, 0.34), mBlade);
+              bl.position.set(3.15, 0.05, 0);
+              pv.add(bl);
+              const tip = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.09, 0.36), mAccent);
+              tip.position.set(6.0, 0.05, 0);
+              pv.add(tip);
+              rotorMain.add(pv);
+            }
+            g.add(rotorMain);
 
-            const hubMain = new THREE.Mesh(new THREE.CylinderGeometry(0.36, 0.36, 0.24, 16), matDark);
-            rotorMain.add(hubMain);
+            const rotorTail = new THREE.Group();
+            rotorTail.position.set(0.42, 0.95, -7.9);
+            for (let i = 0; i < 2; i++) {
+              const pv = new THREE.Group();
+              pv.rotation.x = (i / 2) * Math.PI * 2;
+              const bl = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.55, 0.2), mBlade);
+              bl.position.set(0, 0.88, 0);
+              pv.add(bl);
+              rotorTail.add(pv);
+            }
+            g.add(rotorTail);
 
-            const hubCap = new THREE.Mesh(new THREE.SphereGeometry(0.3, 14, 10), matAccent);
-            hubCap.position.y = 0.16;
-            hubCap.scale.set(1, 0.55, 1);
-            rotorMain.add(hubCap);
+            // 短翼 / 挂架 / 滑橇 —— 两侧对称生成,不 early-return
+            for (const s of [-1, 1]) {
+              const wing = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.2, 1.55), mBody);
+              wing.position.set(s * 1.72, 0.22, 0.4);
+              g.add(wing);
 
-            const MAIN_BLADE_COUNT = 4;
-            for (let i = 0; i < MAIN_BLADE_COUNT; i++) {
-            const pivot = new THREE.Group();
-            pivot.rotation.y = (i / MAIN_BLADE_COUNT) * Math.PI * 2;
+              const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 1.7, 12), mDark);
+              pod.rotation.x = Math.PI / 2;
+              pod.position.set(s * 2.1, -0.42, 0.55);
+              g.add(pod);
 
-            const blade = new THREE.Mesh(new THREE.BoxGeometry(6.0, 0.07, 0.34), matBlade);
-            blade.position.set(3.15, 0.05, 0);
-            pivot.add(blade);
+              const skid = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 4.2), mDark);
+              skid.position.set(s * 0.9, -1.5, 0.3);
+              g.add(skid);
 
-            const grip = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.16, 0.28), matDark);
-            grip.position.set(0.5, 0.05, 0);
-            pivot.add(grip);
+              const strF = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), mDark);
+              strF.position.set(s * 0.85, -1.25, 1.2);
+              strF.rotation.z = s * 0.12;
+              g.add(strF);
 
-            const tip = new THREE.Mesh(new THREE.BoxGeometry(0.55, 0.09, 0.36), matAccent);
-            tip.position.set(6.0, 0.05, 0);
-            pivot.add(tip);
-
-            rotorMain.add(pivot);
+              const strB = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.55, 0.1), mDark);
+              strB.position.set(s * 0.85, -1.25, -0.9);
+              strB.rotation.z = s * 0.12;
+              g.add(strB);
             }
 
-            const tailRotor = new THREE.Group();
-            tailRotor.position.set(0.42, 0.95, -7.9);
-            helicopter.add(tailRotor);
+            g.traverse(o => {
+              if (o.isMesh) { o.castShadow = true; o.receiveShadow = true; }
+            });
 
-            const hubTail = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, 0.32, 12), matDark);
-            hubTail.rotation.z = Math.PI / 2;
-            tailRotor.add(hubTail);
+            // 关键:return 在循环外
+            return { group: g, rotorMain: rotorMain, rotorTail: rotorTail };
+          }
 
-            const TAIL_BLADE_COUNT = 2;
-            for (let i = 0; i < TAIL_BLADE_COUNT; i++) {
-            const pivot = new THREE.Group();
-            pivot.rotation.x = (i / TAIL_BLADE_COUNT) * Math.PI * 2;
+          /* =================================================================
+             姿态 —— 从 updateAttitude 移植
+             ================================================================= */
+          function updateAttitude(dt) {
+            const canTakeoff = S.collective * MAX_LIFT > MASS * G * 1.05;
 
-            const blade = new THREE.Mesh(new THREE.BoxGeometry(0.06, 1.55, 0.2), matBlade);
-            blade.position.set(0, 0.88, 0);
-            pivot.add(blade);
-
-            const tip = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.2, 0.22), matAccent);
-            tip.position.set(0, 1.6, 0);
-            pivot.add(tip);
-
-            tailRotor.add(pivot);
+            /* 着陆锁死 */
+            if (S.grounded && !canTakeoff) {
+              S.pitch = 0; S.roll = 0;
+              S.pitchVel = 0; S.rollVel = 0; S.yawVel = 0;
+              S.targetYaw = S.yaw;
+              _eul.set(0, S.yaw, 0, 'YXZ');
+              S.mesh.quaternion.setFromEuler(_eul);
+              return;
             }
 
-            const tailGearbox = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.45, 0.5), matDark);
-            tailGearbox.position.set(0.2, 0.95, -7.9);
-            helicopter.add(tailGearbox);
+            const hoverK = 1 - (1 - HOVER_ROLL_DAMP) * S.hoverBlend;
 
-            const WING_SIDES = [-1, 1];
-            const muzzleMeshes = [];
+            /* 采样输入 */
+            let yawIn = 0, pitchIn = 0, rollIn = 0;
+            if (typeof keys === 'object' && keys) {
+              if (keys.a) rollIn  -= 1;
+              if (keys.d) rollIn  += 1;
+              if (keys.w) pitchIn -= 1;
+              if (keys.s) pitchIn += 1;
+            }
+            if (typeof analogTurn === 'number') yawIn += analogTurn;
+            // 悬停混合:削弱输入
+            yawIn   *= hoverK;
+            pitchIn *= hoverK;
+            rollIn  *= hoverK;
 
-            for (let w = 0; w < WING_SIDES.length; w++) {
-            const s = WING_SIDES[w];
-
-            const wing = new THREE.Mesh(new THREE.BoxGeometry(1.75, 0.2, 1.55), matBody);
-            wing.position.set(s * 1.72, 0.22, 0.4);
-            helicopter.add(wing);
-
-            const wingTip = new THREE.Mesh(new THREE.BoxGeometry(0.25, 0.3, 1.35), matDark);
-            wingTip.position.set(s * 2.6, 0.22, 0.4);
-            helicopter.add(wingTip);
-
-            const pylon = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.4, 0.9), matDark);
-            pylon.position.set(s * 2.1, -0.1, 0.4);
-            helicopter.add(pylon);
-
-            const pod = new THREE.Mesh(new THREE.CylinderGeometry(0.24, 0.24, 1.7, 12), matDark);
-            pod.rotation.x = Math.PI / 2;
-            pod.position.set(s * 2.1, -0.42, 0.55);
-            helicopter.add(pod);
-
-            const podCap = new THREE.Mesh(new THREE.SphereGeometry(0.24, 12, 8), matMuzzle.clone());
-            podCap.position.set(s * 2.1, -0.42, 1.4);
-            podCap.scale.set(1, 1, 0.5);
-            helicopter.add(podCap);
-            muzzleMeshes.push(podCap);
+            /* 1. 滚转 */
+            if (Math.abs(rollIn) > 0.01) {
+              const tv = rollIn * MAX_ROLL_RATE;
+              S.rollVel += (tv - S.rollVel) * (1 - Math.exp(-CTRL_PRESS * dt));
+            } else {
+              const yawDiff = wrap(S.targetYaw - S.yaw);
+              const targetRoll = clamp(-yawDiff * BANK_GAIN, -MAX_BANK, MAX_BANK);
+              S.rollVel += ((targetRoll - S.roll) * ROLL_FOLLOW - S.rollVel * ROLL_DAMP) * dt;
+            }
+            S.roll = wrap(S.roll + S.rollVel * dt);
+            if (Math.abs(S.roll) < 1e-4 && Math.abs(S.rollVel) < 1e-3) {
+              S.roll = 0; S.rollVel = 0;
             }
 
-            for (let k = 0; k < WING_SIDES.length; k++) {
-            const s = WING_SIDES[k];
-
-            const skid = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 4.2), matDark);
-            helicopter.rotation.order = 'YXZ';
-            helicopter.userData = { isHeli: true };
-            heliMesh = helicopter;
-            heliRotorMain = rotorMain;
-            heliRotorTail = tailRotor;
-            return helicopter;
-        }
-
-        }
-
-        function startHeliEngine() {
-            try {
-                if (!SfxBank.ctx || heliEngSrc) return;
-                const buf = SfxBank._pick('fx_jet_engine');
-                if (!buf) return;
-                heliEngSrc = SfxBank.ctx.createBufferSource();
-                heliEngSrc.buffer = buf; heliEngSrc.loop = true;
-                heliEngGain = SfxBank.ctx.createGain(); heliEngGain.gain.value = 0.42;
-                heliEngSrc.connect(heliEngGain); heliEngGain.connect(SfxBank.ctx.destination);
-                heliEngSrc.start();
-            } catch (e) {}
-        }
-        function stopHeliEngine() {
-            try { if (heliEngSrc) heliEngSrc.stop(); } catch (e) {}
-            heliEngSrc = null; heliEngGain = null;
-        }
-
-        // 起飞:用 helicopter1.0 的真实物理(总距/悬停/倾斜转弯)
-        function spawnHeli() {
-            heli = {
-                x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0,
-                yaw: 0, pitch: 0, roll: 0, pitchVel: 0, rollVel: 0,
-                collective: HELI_HOVER_COLL, timeLeft: HELI_TIME, rockets: HELI_ROCKETS,
-                fireCd: 0, rockCd: 0, grounded: false, _warn: 0
-            };
-            let bx = player && player.mesh ? player.mesh.position.x : 0;
-            let bz = player && player.mesh ? player.mesh.position.z : 0;
-            heli.x = bx + 10; heli.z = bz;
-            heli.y = getTerrainHeight(heli.x, heli.z) + 55;
-            heli.yaw = cameraYaw;
-            hoverMode = false; hoverBlend = 0;
-            let _hb = document.getElementById('btn-hover'); if (_hb) { _hb.style.display = ''; _hb.style.background = ''; }
-            let _cu = document.getElementById('btn-coll-up'); if (_cu) _cu.style.display = 'flex';
-            let _cd = document.getElementById('btn-coll-down'); if (_cd) _cd.style.display = 'flex';
-            heliMesh = buildHeli();
-            heliMesh.position.set(heli.x, heli.y, heli.z);
-            scene.add(heliMesh);
-            startHeliEngine();
-            showKillMessage('武直已进场!左杆控向 / 上下杆控总距 / 火键开火', false, true);
-        }
-
-        function leaveHeli(msg) {
-            isFlying = false; isHeli = false;
-            if (heliMesh) { scene.remove(heliMesh); heliMesh = null; }
-            heli = null;
-            if (player && player.mesh) player.mesh.visible = true;
-            stopHeliEngine();
-            setFlightUI(false, true);
-            hoverMode = false; hoverBlend = 0;
-            let _hb2 = document.getElementById('btn-hover'); if (_hb2) _hb2.style.display = 'none';
-            let _cu2 = document.getElementById('btn-coll-up'); if (_cu2) _cu2.style.display = 'none';
-            let _cd2 = document.getElementById('btn-coll-down'); if (_cd2) _cd2.style.display = 'none';
-            let _jk = document.getElementById('joystick-knob'); if (_jk) { _jk.style.left = '40px'; _jk.style.top = '40px'; }
-            planeUnlocked = false;
-            if (msg) showKillMessage(msg, false, true);
-        }
-
-        // ===== 完整姿态(搬自 helicopter1.0 updateAttitude)=====
-        const _heliEuler = new THREE.Euler();
-        const _heliRollQ = new THREE.Quaternion();
-        const _heliLocalZ = new THREE.Vector3(0, 0, 1);
-        function wrapAng(a) { while (a > Math.PI) a -= Math.PI * 2; while (a < -Math.PI) a += Math.PI * 2; return a; }
-        function updateHeliAttitude(dt) {
-            let yawIn  = (typeof analogTurn === 'number' ? analogTurn : 0);
-            let pitchIn = -(typeof analogMove === 'number' ? analogMove : 0);
-            if (keys.a) yawIn -= 1;  if (keys.d) yawIn += 1;
-            if (keys.w) pitchIn += 1; if (keys.s) pitchIn -= 1;
-            const _hk = (heli._hoverKeep !== undefined) ? heli._hoverKeep : 1;
-            yawIn = Math.max(-1, Math.min(1, yawIn)) * _hk;
-            pitchIn = Math.max(-1, Math.min(1, pitchIn)) * _hk;
-
-            if (heli.targetYaw === undefined) heli.targetYaw = heli.yaw;
-            if (heli.targetPitch === undefined) heli.targetPitch = 0;
-            if (heli.rollVel === undefined) { heli.rollVel = 0; heli.pitchVel = 0; heli.yawVel = 0; }
-
-            const canTakeoff = heli.collective * HELI_MAX_LIFT > HELI_MASS * HELI_GRAV * 1.05;
-            if (heli.grounded && !canTakeoff) {                 // 着陆锁死
-                heli.pitch = 0; heli.roll = 0;
-                heli.pitchVel = 0; heli.rollVel = 0; heli.yawVel = 0;
-                heli.targetYaw = heli.yaw;
-                return;
-            }
-
-            // 1. 滚转(悬停时更稳)
-            const _hoverK = 1 - (1 - HELI_HOVER_ROLL_DAMP) * hoverBlend;
-            const yawDiff = wrapAng(heli.targetYaw - heli.yaw);
+            /* 2. 偏航 */
             if (Math.abs(yawIn) > 0.01) {
-                heli.rollVel += (yawIn * HELI_MAX_ROLL_RATE - heli.rollVel) * (1 - Math.exp(-HELI_CTRL_PRESS * dt));
-            } else {
-                const targetRoll = Math.max(-HELI_MAX_BANK, Math.min(HELI_MAX_BANK, -yawDiff * HELI_BANK_GAIN));
-                heli.rollVel += ((targetRoll - heli.roll) * HELI_ROLL_FOLLOW - heli.rollVel * HELI_ROLL_DAMP) * dt;
+              S.targetYaw = wrap(S.targetYaw + yawIn * YAW_RATE * dt);
             }
-            heli.roll = wrapAng(heli.roll + heli.rollVel * dt);
-
-            // 2. 偏航
-            if (Math.abs(yawIn) > 0.01) heli.targetYaw = wrapAng(heli.targetYaw + yawIn * HELI_YAW_RATE * dt);
-            if (Math.abs(heli.roll) > 1e-4) heli.yaw = wrapAng(heli.yaw + (-Math.sin(heli.roll) * HELI_TURN_PER_SIN) * dt);
+            if (Math.abs(S.roll) > 1e-4) {
+              S.yaw = wrap(S.yaw - Math.sin(S.roll) * TURN_PER_SIN * dt);
+            }
             {
-                const yawErr = wrapAng(heli.targetYaw - heli.yaw);
-                const tv = Math.max(-HELI_MAX_YAW_RATE, Math.min(HELI_MAX_YAW_RATE, yawErr * HELI_YAW_FOLLOW));
-                heli.yawVel += (tv - heli.yawVel) * (1 - Math.exp(-HELI_CTRL_PRESS * dt));
-                heli.yaw = wrapAng(heli.yaw + heli.yawVel * dt);
+              const err = wrap(S.targetYaw - S.yaw);
+              const tv  = clamp(err * YAW_FOLLOW, -MAX_YAW_RATE, MAX_YAW_RATE);
+              S.yawVel += (tv - S.yawVel) * (1 - Math.exp(-CTRL_PRESS * dt));
+              S.yaw = wrap(S.yaw + S.yawVel * dt);
+              if (Math.abs(err) < 1e-4 && Math.abs(S.yawVel) < 1e-3) {
+                S.yaw = S.targetYaw;
+                S.yawVel = 0;
+              }
             }
 
-            // 3. 俯仰
+            /* 3. 俯仰 */
             if (Math.abs(pitchIn) > 0.01) {
-                heli.pitchVel += (pitchIn * HELI_PITCH_MAN_RATE - heli.pitchVel) * (1 - Math.exp(-HELI_CTRL_PRESS * dt));
+              const tv = pitchIn * PITCH_MAN_RATE;
+              S.pitchVel += (tv - S.pitchVel) * (1 - Math.exp(-CTRL_PRESS * dt));
             } else {
-                const pe = heli.targetPitch - heli.pitch, lim = HELI_MAX_PITCH_RATE * 3.0;
-                const tv = Math.max(-lim, Math.min(lim, pe * HELI_PITCH_FOLLOW));
-                heli.pitchVel += (tv - heli.pitchVel) * (1 - Math.exp(-HELI_CTRL_PRESS * dt));
+              const err = S.targetPitch - S.pitch;
+              const tv  = clamp(err * PITCH_FOLLOW, -MAX_PITCH_RATE * 3, MAX_PITCH_RATE * 3);
+              S.pitchVel += (tv - S.pitchVel) * (1 - Math.exp(-CTRL_PRESS * dt));
             }
-            heli.pitch = Math.max(-HELI_PITCH_LIM_DOWN, Math.min(HELI_PITCH_LIM_UP, heli.pitch + heli.pitchVel * dt));
+            S.pitch = clamp(S.pitch + S.pitchVel * dt, -PITCH_LIM_DOWN, PITCH_LIM_UP);
+            if (Math.abs(S.pitch - S.targetPitch) < 1e-4 && Math.abs(S.pitchVel) < 1e-3) {
+              S.pitch = S.targetPitch;
+              S.pitchVel = 0;
+            }
 
-            // 4. NaN 安全
-            if (!isFinite(heli.pitch)) heli.pitch = 0;
-            if (!isFinite(heli.roll))  heli.roll = 0;
-            if (!isFinite(heli.yaw))   heli.yaw = 0;
+            /* 4. NaN 兜底 */
+            if (!isFinite(S.pitch)) S.pitch = 0;
+            if (!isFinite(S.roll))  S.roll  = 0;
+            if (!isFinite(S.yaw))   S.yaw   = 0;
+            if (!isFinite(S.pitchVel)) S.pitchVel = 0;
+            if (!isFinite(S.rollVel))  S.rollVel  = 0;
+            if (!isFinite(S.yawVel))   S.yawVel   = 0;
+            if (!isFinite(S.targetYaw))   S.targetYaw   = 0;
+            if (!isFinite(S.targetPitch)) S.targetPitch = 0;
 
-            // 5. 四元数
-            heliMesh.quaternion.setFromEuler(_heliEuler.set(-heli.pitch, heli.yaw + Math.PI, 0, 'YXZ'));
-            heliMesh.quaternion.multiply(_heliRollQ.setFromAxisAngle(_heliLocalZ, heli.roll));
-            heliMesh.updateMatrixWorld(true);
-        }
+            /* 5. 合成四元数(唯一一次写姿态) */
+            _eul.set(-S.pitch, S.yaw + Math.PI, 0, 'YXZ');
+            S.mesh.quaternion.setFromEuler(_eul);
+            _q.setFromAxisAngle(_zAxis, S.roll);
+            S.mesh.quaternion.multiply(_q);
+            S.mesh.updateMatrixWorld(true);
+          }
 
-        function updateHeli(dt) {
-            if (!heli || !heliMesh) return;
-            // 松手自动悬停(不需要额外按钮):摇杆不动 + 无键盘 → 自动悬停
-            let _mk = (typeof analogMove === 'number' ? analogMove : 0);
-            let _tk = (typeof analogTurn === 'number' ? analogTurn : 0);
-            let _act = Math.abs(_mk) > 0.12 || Math.abs(_tk) > 0.12 || keys.a || keys.d || keys.w || keys.s;
-            autoHover = !_act;
-            if (autoHover && !hoverMode) { hoverMode = true; _hb = document.getElementById('btn-hover'); if (_hb) _hb.style.background = 'rgba(168,255,214,0.35)'; }
-            else if (!autoHover && hoverMode && !hoverManual) { hoverMode = false; _hb = document.getElementById('btn-hover'); if (_hb) _hb.style.background = ''; }
-            // ===== 悬停混合(搬自 helicopter1.0)=====
-            const hoverTarget = hoverMode ? 1 : 0;
-            hoverBlend += (hoverTarget - hoverBlend) * (1 - Math.exp(-HELI_HOVER_BLEND_RATE * dt));
-            if (hoverBlend < 1e-4) hoverBlend = 0;
-            heli._hoverKeep = 1 - (1 - HELI_HOVER_INPUT_DAMP) * hoverBlend;
-            if (hoverBlend > 0.01) {
-                heli.collective += (HELI_HOVER_COLLECTIVE - heli.collective) * (1 - Math.exp(-HELI_HOVER_COLL_DAMP * dt));
-                heli._collLock = true;
-            } else heli._collLock = false;
-            // ---- 输入:摇杆 ----
-            let yawIn = (typeof analogTurn === 'number' ? analogTurn : 0);
-            // ★ 修复:总距不再抢摇杆上下(摇杆上下=前进/后退),改用 Shift/Ctrl 或总距按钮
+          /* =================================================================
+             物理 —— 从 updatePhysics 移植
+             ================================================================= */
+          function updatePhysics(dt) {
+            if (S.collective <= 0.01) _localT.set(0, 0, 0);
+            else _localT.set(0, S.collective * MAX_LIFT, 0);
+
+            _worldT.copy(_localT).applyQuaternion(S.mesh.quaternion);
+            _gravF.set(0, -MASS * G, 0);
+            _totF.copy(_worldT).add(_gravF);
+            _acc.copy(_totF).divideScalar(MASS);
+
+            S.vel.addScaledVector(_acc, dt);
+            S.vel.multiplyScalar(1 - AIR_DRAG * dt);
+            S.vel.y *= (1 - VERT_DAMP * dt);
+            S.pos.addScaledVector(S.vel, dt);
+
+            const gy = (typeof getTerrainHeight === 'function') ? getTerrainHeight(S.pos.x, S.pos.z) : 0;
+            if (S.pos.y <= gy + GROUND_CLEAR) {
+              S.pos.y = gy + GROUND_CLEAR;
+              if (S.vel.y < 0) S.vel.y = 0;
+              const fr = Math.max(0, 1 - 3.0 * dt);
+              S.vel.x *= fr; S.vel.z *= fr;
+              S.grounded = true;
+            } else {
+              S.grounded = false;
+            }
+
+            if (typeof MAP_HALF === 'number') {
+              const lim = MAP_HALF - 8;
+              if (Math.abs(S.pos.x) > lim) { S.pos.x = Math.sign(S.pos.x) * lim; S.vel.x = 0; }
+              if (Math.abs(S.pos.z) > lim) { S.pos.z = Math.sign(S.pos.z) * lim; S.vel.z = 0; }
+            }
+            if (S.pos.y > 260) S.pos.y = 260;
+
+            if (!isFinite(S.pos.x) || !isFinite(S.pos.y) || !isFinite(S.pos.z) ||
+                !isFinite(S.vel.x) || !isFinite(S.vel.y) || !isFinite(S.vel.z)) {
+              S.pos.set(0, 80, 0);
+              S.vel.set(0, 0, 0);
+            }
+          }
+
+          /* =================================================================
+             地面下洗气流尘埃
+             ================================================================= */
+          const dustMat = new THREE.MeshBasicMaterial({ color: 0xc8c0a8, transparent: true, opacity: 0.55, depthWrite: false });
+
+          function spawnDust(x, z, strength) {
+            const s = 0.6 + Math.random() * 0.8;
+            const m = new THREE.Mesh(new THREE.SphereGeometry(s, 8, 6), dustMat.clone());
+            const a = Math.random() * Math.PI * 2;
+            const r = Math.random() * DUST_SPREAD * 0.4;
+            const gy = (typeof getTerrainHeight === 'function') ? getTerrainHeight(x, z) : 0;
+            m.position.set(x + Math.cos(a) * r, gy + 0.2, z + Math.sin(a) * r);
+            m.scale.set(1, 0.12, 1);
+            scene.add(m);
+            const vr = 3 + Math.random() * 3 + strength * 2;
+            S.dustParticles.push({
+              mesh: m, life: DUST_LIFE, maxLife: DUST_LIFE,
+              vx: Math.cos(a) * vr, vy: 0.25 + Math.random() * 0.4, vz: Math.sin(a) * vr,
+              grow: 2.5 + Math.random() * 1.5,
+            });
+          }
+
+          function updateDust(dt) {
+            for (let i = S.dustParticles.length - 1; i >= 0; i--) {
+              const p = S.dustParticles[i];
+              p.life -= dt;
+              p.mesh.position.x += p.vx * dt;
+              p.mesh.position.y += p.vy * dt;
+              p.mesh.position.z += p.vz * dt;
+              p.vx *= (1 - dt); p.vz *= (1 - dt); p.vy *= (1 - 0.6 * dt);
+              const k = p.life / p.maxLife;
+              const sc = 0.4 + (1 - k) * p.grow;
+              p.mesh.scale.set(sc, sc * 0.12, sc);
+              p.mesh.material.opacity = 0.55 * k;
+              if (p.life <= 0) {
+                scene.remove(p.mesh);
+                p.mesh.geometry.dispose();
+                p.mesh.material.dispose();
+                S.dustParticles.splice(i, 1);
+              }
+            }
+          }
+
+          /* =================================================================
+             武器 —— 使用引擎的 Projectile
+             ================================================================= */
+          function fireRockets() {
+            if (S.rockets <= 0 || S.rocketCd > 0) return;
+            S.rocketCd = ROCKET_CD + ROCKET_PAIR_GAP;
+            const n = Math.min(2, S.rockets);
+            S.rockets -= n;
+            S.rocketQueue.push({ delay: 0,               side: 0 });
+            if (n >= 2) S.rocketQueue.push({ delay: ROCKET_PAIR_GAP, side: 1 });
+
+            if (typeof SfxBank !== 'undefined' && SfxBank.playAt) {
+              SfxBank.playAt('fx_msl_tank', S.mesh.position, 0.85);
+            } else if (typeof SoundManager !== 'undefined' && SoundManager.playMissileLaunch) {
+              SoundManager.playMissileLaunch(S.mesh.position, 'fx_msl_tank');
+            }
+          }
+
+          function spawnRocket(side) {
+            const local = ROCKET_LAUNCH[side].clone()
+              .applyQuaternion(S.mesh.quaternion)
+              .add(S.mesh.position);
+
+            _aimEul.set(-S.targetPitch, S.targetYaw, 0, 'YXZ');
+            _aimQ.setFromEuler(_aimEul);
+            const dir = new THREE.Vector3(0, 0, 1).applyQuaternion(_aimQ).normalize();
+
+            if (typeof Projectile === 'function' && typeof projectiles !== 'undefined') {
+              const pr = new Projectile(
+                local, dir.clone(), ROCKET_SPEED, ROCKET_DMG,
+                true, 0xff6600, 0.5, false, null,
+                (typeof player !== 'undefined' && player && player.unitId) || 'player_001'
+              );
+              pr.guided = false;
+              pr.splashRadius = 15;
+              pr.splashDamage = ROCKET_DMG;
+              projectiles.push(pr);
+            }
+          }
+
+          function updateRockets(dt) {
+            if (S.rocketCd > 0) S.rocketCd -= dt;
+            for (let i = S.rocketQueue.length - 1; i >= 0; i--) {
+              S.rocketQueue[i].delay -= dt;
+              if (S.rocketQueue[i].delay <= 0) {
+                spawnRocket(S.rocketQueue[i].side);
+                S.rocketQueue.splice(i, 1);
+              }
+            }
+          }
+
+          /* =================================================================
+             相机
+             ================================================================= */
+          function updateCamera(dt) {
+            _visual.copy(S.pos);
+            _visual.y += GROUND_CLEAR;
+
+            const yawDiff = wrap(S.targetYaw - S.camYaw);
+            S.camYaw = wrap(S.camYaw + yawDiff * (1 - Math.exp(-CAM_FOLLOW * dt)));
+
+            _camEul.set(0, S.camYaw, 0, 'YXZ');
+            _camQ.setFromEuler(_camEul);
+            _camOff.set(0, 7.0, -13.5).applyQuaternion(_camQ);
+
+            const desired = _visual.clone().add(_camOff);
+            camera.position.lerp(desired, 1 - Math.exp(-CAM_FOLLOW * 1.5 * dt));
+
+            _camEul.set(-S.targetPitch, S.targetYaw, 0, 'YXZ');
+            _camQ.setFromEuler(_camEul);
+            const aimDir = new THREE.Vector3(0, 0, 1).applyQuaternion(_camQ);
+
+            _camLook.copy(_visual);
+            _camLook.y += 1.2;
+            _camLook.addScaledVector(aimDir, 25);
+            camera.lookAt(_camLook);
+
+            // 回写引擎准星使用的全局相机角(不影响物理)
+            if (typeof cameraYaw === 'number')   cameraYaw   = S.targetYaw;
+            if (typeof cameraPitch === 'number') cameraPitch = -S.targetPitch;
+          }
+
+          /* =================================================================
+             主更新
+             ================================================================= */
+          function update(dt) {
+            if (!S.active || !S.mesh) return;
+
+            /* 1. 总距输入:摇杆上下 + Shift/Ctrl */
             let collIn = 0;
-            if (keys.shift) collIn += 1; if (keys.control) collIn -= 1;
-            if (heli._collUp) collIn += 1; if (heli._collDown) collIn -= 1;
-            if (keys.a) yawIn -= 1; if (keys.d) yawIn += 1;
-            if (!heli._collLock) heli.collective = Math.max(0, Math.min(1, heli.collective + collIn * HELI_COLL_RATE * dt));
-            heli.yaw += yawIn * 1.1 * dt;
-
-            // ---- 物理:升力(本地 Y 轴)× 机体朝向 ----
-            // ★ 修复:俯仰由摇杆上下控制(之前 pitch 永远是 0 → 没有任何水平推力)
-            let pitchIn = -(typeof analogMove === 'number' ? analogMove : 0);
-            if (keys.w) pitchIn += 1; if (keys.s) pitchIn -= 1;
-            heli.pitch += pitchIn * 0.9 * dt;
-            heli.pitch = Math.max(-0.55, Math.min(0.55, heli.pitch));
-            // ★ 修复:不推俯仰时自动回正(悬停感)
-            if (Math.abs(pitchIn) < 0.01) heli.pitch *= Math.max(0, 1 - 2.0 * dt);
-
-            let cp = Math.cos(heli.pitch), sp = Math.sin(heli.pitch);
-            let lift = heli.collective * HELI_MAX_LIFT;
-            let ay = (lift / HELI_MASS) - HELI_GRAV;
-            // ★ 修复:低头(sp<0)→ 向前飞;抬头 → 向后(这才是直升机的推力来源)
-            let fx = Math.sin(heli.yaw) * (-sp) * (lift / HELI_MASS);
-            let fz = Math.cos(heli.yaw) * (-sp) * (lift / HELI_MASS);
-            heli.vy += ay * dt;
-            heli.vx += fx * dt;
-            heli.vz += fz * dt;
-            // 滚转 → 侧向漂移 + 自动转弯
-            let rollSide = Math.sin(heli.roll) * (lift / HELI_MASS) * 0.5;
-            heli.vx += Math.cos(heli.yaw) * rollSide * dt;
-            heli.vz += -Math.sin(heli.yaw) * rollSide * dt;
-            heli.yaw += Math.sin(heli.roll) * HELI_TURN_PER_SIN * dt;
-
-            // 阻尼
-            let drag = Math.max(0, 1 - HELI_AIR_DRAG * dt);
-            heli.vx *= drag; heli.vz *= drag;
-            heli.vy *= Math.max(0, 1 - HELI_VERT_DAMP * dt);
-
-            heli.x += heli.vx * dt; heli.y += heli.vy * dt; heli.z += heli.vz * dt;
-
-            // 地形 / 边界
-            let ty = getTerrainHeight(heli.x, heli.z);
-            if (heli.y <= ty + HELI_GROUND_CLEAR) {
-                heli.y = ty + HELI_GROUND_CLEAR;
-                if (heli.vy < 0) heli.vy = 0;
-                let fr = Math.max(0, 1 - HELI_GND_FRICTION * dt);
-                heli.vx *= fr; heli.vz *= fr;
-                heli.grounded = true;
-            } else { heli.grounded = false; }
-            if (heli.y > 260) heli.y = 260;
-            if (Math.abs(heli.x) > MAP_HALF - 8) { heli.x = Math.sign(heli.x) * (MAP_HALF - 8); heli.vx = 0; }
-            if (Math.abs(heli.z) > MAP_HALF - 8) { heli.z = Math.sign(heli.z) * (MAP_HALF - 8); heli.vz = 0; }
-
-            heliMesh.position.set(heli.x, heli.y, heli.z);
-            heliMesh.rotation.set(-heli.pitch, heli.yaw, heli.roll, 'YXZ');   // 修复:去掉 +π(原来机头朝后,和子弹方向相反)
-            if (heliRotorMain) heliRotorMain.rotation.y += 30 * dt;
-            if (heliRotorTail) heliRotorTail.rotation.x -= 42 * dt;
-
-            // ---- 相机:追尾 ----
-            let bx2 = Math.sin(heli.yaw), bz2 = Math.cos(heli.yaw);
-            camera.position.set(heli.x - bx2 * 26, heli.y + 9, heli.z - bz2 * 26);
-            camera.lookAt(heli.x + bx2 * 40, heli.y - 2, heli.z + bz2 * 40);
-            cameraYaw = heli.yaw; cameraPitch = heli.pitch;
-
-            // ---- 武器 ----
-            heli.fireCd -= dt; heli.rockCd -= dt;
-            let fwd = new THREE.Vector3(Math.sin(heli.yaw), -heli.pitch, Math.cos(heli.yaw)).normalize();
-            if (mouse.leftDown && heli.fireCd <= 0) {
-                heli.fireCd = 0.09;
-                let sp0 = new THREE.Vector3(heli.x, heli.y - 0.9, heli.z).add(fwd.clone().multiplyScalar(3));
-                if (!SfxBank.playAt('fx_plane_cannon', sp0, 0.8)) SoundManager.playCannon(sp0, true);
-                let pr = new Projectile(sp0, fwd.clone(), 420, 55, true, 0xffff99, 0.3, false, null, player.unitId);
-                pr.splashRadius = 5; pr.splashDamage = 55;
-                projectiles.push(pr);
-            }
-            if (mouse.rightDown && heli.rockCd <= 0 && heli.rockets > 0) {
-                heli.rockCd = 0.4;
-                let n = Math.min(2, heli.rockets); heli.rockets -= n;
-                for (let sx of (n >= 2 ? [-2.1, 2.1] : [-2.1])) {
-                    let sp0 = new THREE.Vector3(heli.x + Math.cos(heli.yaw) * sx, heli.y - 0.42, heli.z - Math.sin(heli.yaw) * sx);
-                    let pr = new Projectile(sp0, fwd.clone(), 190, 380, true, 0xff6600, 0.55, true, null, player.unitId);
-                    pr.guided = false; pr.splashRadius = 15; pr.splashDamage = 380;
-                    projectiles.push(pr);
-                }
-                if (!SfxBank.playAt('fx_msl_tank', new THREE.Vector3(heli.x, heli.y, heli.z), 0.85)) SoundManager.playMissileLaunch(new THREE.Vector3(heli.x, heli.y, heli.z), 'fx_msl_tank');
+            if (typeof analogMove === 'number') collIn += analogMove;
+            if (typeof keys === 'object' && keys) {
+              if (keys.shift)   collIn += 1;
+              if (keys.control) collIn -= 1;
             }
 
-            // 摇杆视觉:不动时回到中心(表示悬停)
+            /* 2. 悬停混合 */
+            const hTarget = S.hoverMode ? 1 : 0;
+            S.hoverBlend += (hTarget - S.hoverBlend) * (1 - Math.exp(-HOVER_BLEND_RATE * dt));
+            if (S.hoverBlend < 1e-4) S.hoverBlend = 0;
+
+            /* 3. 总距 */
+            if (S.hoverBlend > 0.01) {
+              S.collective += (HOVER_COLL - S.collective) * (1 - Math.exp(-HOVER_COLL_DAMP * dt));
+            }
+            if (collIn !== 0 && S.hoverBlend < 0.5) {
+              S.collective += collIn * COLL_RATE * dt;
+            }
+            S.collective = clamp(S.collective, COLL_MIN, COLL_MAX);
+            if (!isFinite(S.collective)) S.collective = HOVER_COLL;
+
+            /* 4. 姿态 + 物理 */
+            updateAttitude(dt);
+            updatePhysics(dt);
+
+            /* 5. 同步网格 */
+            S.mesh.position.copy(S.pos);
+
+            /* 6. 旋翼 */
+            const collF = clamp(S.collective, 0, 1);
+            const spin  = collF >= 0.2 ? 1.0 : collF / 0.2;
+            if (S.rotorMain) S.rotorMain.rotation.y += 20 * spin * dt;
+            if (S.rotorTail) S.rotorTail.rotation.x -= 48 * spin * dt;
+
+            /* 7. 尘埃 */
+            if (S.pos.y < DUST_H + GROUND_CLEAR && S.collective > 0.15) {
+              const prox = 1 - clamp((S.pos.y - GROUND_CLEAR) / DUST_H, 0, 1);
+              const strength = prox * prox;
+              S.dustAccum += dt * DUST_RATE * strength * collF;
+              while (S.dustAccum >= 1) {
+                S.dustAccum -= 1;
+                spawnDust(S.pos.x, S.pos.z, strength);
+              }
+            } else S.dustAccum = 0;
+            updateDust(dt);
+
+            /* 8. 武器 */
+            updateRockets(dt);
+            if (typeof mouse === 'object' && mouse && mouse.leftDown) {
+              fireRockets();
+            }
+
+            /* 9. 相机 */
+            updateCamera(dt);
+
+            /* 10. 倒计时 */
+            S.timeLeft -= dt;
+            if (S.timeLeft <= 10 && !S.warning) {
+              S.warning = true;
+              if (typeof showKillMessage === 'function') showKillMessage('武直燃油告急(10 秒)!', false, true);
+            }
+            if (S.timeLeft <= 0) {
+              leave('⛽ 燃油耗尽,自动返航');
+              return;
+            }
+
+            /* 11. HUD */
             try {
-                if (joyKnobEl) {
-                    let _mv = (typeof analogMove === 'number' ? analogMove : 0);
-                    let _tv = (typeof analogTurn === 'number' ? analogTurn : 0);
-                    joyKnobEl.style.left = (40 - _tv * 30) + 'px';
-                    joyKnobEl.style.top = (40 + _mv * 30) + 'px';
-                }
+              const um = document.getElementById('ui-ammo-missile');   if (um) um.innerText = S.rockets;
+              const mm = document.getElementById('m-ammo-missile-m');   if (mm) mm.innerText = S.rockets;
+              const mn = document.getElementById('ui-name-missile');
+              if (mn) mn.textContent = '火箭弹 ×' + S.rockets + ' · 油 ' + Math.max(0, Math.ceil(S.timeLeft)) + 's';
             } catch (e) {}
-            // ---- 倒计时 / HUD ----
-            heli.timeLeft -= dt;
-            if (heli.timeLeft <= 10.5 && heli._warn !== 1) { heli._warn = 1; showKillMessage('武直燃油告急(10 秒)!', false, true); }
-            if (heli.timeLeft <= 0) { leaveHeli('武直燃油耗尽,自动返航'); return; }
+          }
+
+          /* =================================================================
+             进入 / 离开
+             ================================================================= */
+          function enter() {
+            if (S.active) return;
+
+            const built = buildMesh();
+            S.mesh = built.group;
+            S.rotorMain = built.rotorMain;
+            S.rotorTail = built.rotorTail;
+
+            const px = (typeof player !== 'undefined' && player && player.mesh) ? player.mesh.position.x : 0;
+            const pz = (typeof player !== 'undefined' && player && player.mesh) ? player.mesh.position.z : 0;
+            const gy = (typeof getTerrainHeight === 'function') ? getTerrainHeight(px, pz) : 0;
+
+            S.pos.set(px + 12, gy + 55, pz);
+            S.vel.set(0, 0, 0);
+            S.yaw = (typeof cameraYaw === 'number') ? cameraYaw : 0;
+            S.targetYaw = S.yaw;
+            S.camYaw = S.yaw;
+            S.pitch = 0; S.roll = 0;
+            S.yawVel = 0; S.pitchVel = 0; S.rollVel = 0;
+            S.targetPitch = 0;
+            S.collective = HOVER_COLL;
+            S.hoverMode = false; S.hoverBlend = 0;
+            S.timeLeft = TIME_LIMIT;
+            S.rockets  = ROCKETS_TOTAL;
+            S.rocketCd = 0;
+            S.rocketQueue.length = 0;
+            S.warning = false;
+            S.grounded = false;
+
+            S.mesh.position.copy(S.pos);
+            scene.add(S.mesh);
+
+            if (typeof player !== 'undefined' && player && player.mesh) {
+              player.mesh.visible = false;
+            }
+
             try {
-                let mm = document.getElementById('m-ammo-missile-m'); if (mm) mm.innerText = heli.rockets;
-                let um = document.getElementById('ui-ammo-missile'); if (um) um.innerText = heli.rockets;
-                let mn = document.getElementById('ui-name-missile'); if (mn) mn.textContent = '火箭弹 ×' + heli.rockets + ' · 油 ' + Math.max(0, Math.ceil(heli.timeLeft)) + 's';
+              const j  = document.getElementById('joystick-area');  if (j)  j.style.display = '';
+              const hb = document.getElementById('btn-hover');       if (hb) { hb.style.display = ''; hb.style.background = ''; }
+              const gr = document.getElementById('gun-reticle');     if (gr) gr.style.display = 'none';
             } catch (e) {}
-        }
+
+            S.active = true;
+
+            if (typeof playVoice === 'function') {
+              playVoice('v_air_inbound_' + (1 + Math.floor(Math.random() * 3)), 0);
+            }
+            if (typeof showKillMessage === 'function') {
+              showKillMessage('武直已进场!摇杆控向 / W S 俯仰 / A D 滚转 / 火键开火 / 空格悬停', false, true);
+            }
+          }
+
+          function leave(msg) {
+            if (!S.active) return;
+            S.active = false;
+
+            if (S.mesh) {
+              scene.remove(S.mesh);
+              S.mesh.traverse(o => { if (o.isMesh && o.geometry) o.geometry.dispose(); });
+              S.mesh = null;
+            }
+            S.rotorMain = null;
+            S.rotorTail = null;
+
+            for (let i = S.dustParticles.length - 1; i >= 0; i--) {
+              scene.remove(S.dustParticles[i].mesh);
+              S.dustParticles[i].mesh.geometry.dispose();
+              S.dustParticles[i].mesh.material.dispose();
+            }
+            S.dustParticles.length = 0;
+            S.rocketQueue.length = 0;
+
+            if (typeof player !== 'undefined' && player && player.mesh) {
+              player.mesh.visible = true;
+            }
+
+            try {
+              const hb = document.getElementById('btn-hover');
+              if (hb) { hb.style.display = 'none'; hb.style.background = ''; }
+            } catch (e) {}
+
+            if (msg && typeof showKillMessage === 'function') showKillMessage(msg, false, true);
+          }
+
+          function toggleHover() {
+            if (!S.active) return;
+            S.hoverMode = !S.hoverMode;
+            try {
+              const b = document.getElementById('btn-hover');
+              if (b) b.style.background = S.hoverMode ? 'rgba(168,255,214,0.6)' : '';
+            } catch (e) {}
+            if (typeof showKillMessage === 'function') {
+              showKillMessage(S.hoverMode ? '悬停:开' : '悬停:关', false, true);
+            }
+          }
+
+          return { enter, leave, update, toggleHover, isActive: () => S.active, state: S };
+        })();
+
+        window.HeliVehicle = HeliVehicle;
+
+
 
         // ================= 苏-25 战机 =================
         const PLANE_UNLOCK_KILLS = 5;
@@ -6202,7 +6420,8 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                     isFlying = true;
                     if (Math.random() < 0.5) {          // ★ 50% 出武直
                         isHeli = true;
-                        spawnHeli();
+                        isFlying = true;
+                        HeliVehicle.enter();
                         setFlightUI(true, true);      // ★ 武直保留移动摇杆
                         // 武直:保留摇杆(左杆=飞行,松手=自动悬停)
                         let _je2 = document.getElementById('joystick-area');
@@ -6226,7 +6445,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                     playVoice('v_air_inbound_' + (1 + Math.floor(Math.random() * 3)), 0);
                     showKillMessage('苏-25 已进场!火键=航炮 / 导弹键=火箭弹', false, true);
                 } else {
-                    if (isHeli) leaveHeli('已返回坦克(再击杀 ' + PLANE_UNLOCK_KILLS + ' 个可再次呼叫)');
+                    if (HeliVehicle.isActive()) HeliVehicle.leave('已返回坦克(再击杀 ' + PLANE_UNLOCK_KILLS + ' 个可再次呼叫)');
                     else leavePlane('已返回坦克(再击杀 ' + PLANE_UNLOCK_KILLS + ' 个可再次呼叫)');
                 }
             } catch (e) { console.warn('plane toggle failed', e); }
