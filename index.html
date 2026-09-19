@@ -5921,9 +5921,12 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                 setTimeout(function () { playVoice('v_arty_num_' + _ni, 0); }, 2950);
                 setTimeout(function () { playVoice('v_arty_ack_' + (1 + Math.floor(Math.random() * 3)), 0); }, 3850);
                 setTimeout(function () { playVoice('v_arty_fire_' + (1 + Math.floor(Math.random() * 3)), 0); }, 5000);
+                // 落弹与播报解耦:即使播报出错也一定会落下
                 setTimeout(function () {
-                    showKillMessage('目标坐标 ' + _coord, false, true);
-                    artyStrikes.push({ x: tg.x, z: tg.z, t: 0, done: 0, next: 0 });
+                    try { showKillMessage('目标坐标 ' + _code, false, true); } catch (e) {}
+                }, 5800);
+                setTimeout(function () {
+                    try { artyStrikes.push({ x: tg.x, z: tg.z, t: 0, done: 0, next: 0 }); } catch (e) { console.warn('arty push failed', e); }
                 }, 5800);
             } catch (e) { console.warn('arty failed', e); }
         }
