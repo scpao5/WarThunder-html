@@ -6003,7 +6003,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             if (Math.abs(heli.z) > MAP_HALF - 8) { heli.z = Math.sign(heli.z) * (MAP_HALF - 8); heli.vz = 0; }
 
             heliMesh.position.set(heli.x, heli.y, heli.z);
-            heliMesh.rotation.set(-heli.pitch, heli.yaw + Math.PI, heli.roll, 'YXZ');
+            heliMesh.rotation.set(-heli.pitch, heli.yaw, heli.roll, 'YXZ');   // 修复:去掉 +π(原来机头朝后,和子弹方向相反)
             if (heliRotorMain) heliRotorMain.rotation.y += 30 * dt;
             if (heliRotorTail) heliRotorTail.rotation.x -= 42 * dt;
 
