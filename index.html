@@ -2403,12 +2403,16 @@
             });
         }
         
+        let joyCtl = null;      // 摇杆控制器引用(飞行时复用)
+        let joyKnobEl = null;   // 摇杆旋钮(飞行时用于视觉反馈)
         function setupMobileControls() {
             const joyArea = document.getElementById('joystick-area');
             const joyKnob = document.getElementById('joystick-knob');
             let joyTouchId = null;
             let joyCenterX = 0, joyCenterY = 0;
             const maxRadius = 40;
+            joyKnobEl = joyKnob;
+            joyCtl = { get id() { return joyTouchId; }, area: joyArea, knob: joyKnob, get centerX() { return joyCenterX; }, get centerY() { return joyCenterY; }, maxRadius: maxRadius };
 
             joyArea.addEventListener('touchstart', e => {
                 e.preventDefault();
@@ -5597,13 +5601,14 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
         // ================= 武直(模型搬自 helicopter1.0) =================
         let heli = null, heliMesh = null, heliRotorMain = null, heliRotorTail = null;
         let heliEngSrc = null, heliEngGain = null;
-        let hoverMode = false, hoverBlend = 0;
+        let hoverMode = false, hoverBlend = 0, autoHover = true, hoverManual = false;
         function toggleHover() {
             if (!isHeli) return;
-            hoverMode = !hoverMode;
+            hoverManual = !hoverManual;
+            hoverMode = hoverManual ? true : autoHover;
             let b = document.getElementById('btn-hover');
-            if (b) b.style.background = hoverMode ? 'rgba(168,255,214,0.35)' : '';
-            showKillMessage(hoverMode ? '悬停模式:开(总距自动回中)' : '悬停模式:关', false, true);
+            if (b) b.style.background = hoverManual ? 'rgba(168,255,214,0.6)' : (hoverMode ? 'rgba(168,255,214,0.35)' : '');
+            showKillMessage(hoverManual ? '悬停锁定:开(强制悬停)' : '悬停锁定:关(松手自动悬停)', false, true);
         }
 
         // ================= 武直(模型搬自 helicopter1.0) =================
@@ -5818,6 +5823,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
             setFlightUI(false);
             hoverMode = false; hoverBlend = 0;
             let _hb2 = document.getElementById('btn-hover'); if (_hb2) _hb2.style.display = 'none';
+            let _jk = document.getElementById('joystick-knob'); if (_jk) { _jk.style.left = '40px'; _jk.style.top = '40px'; }
             planeUnlocked = false;
             if (msg) showKillMessage(msg, false, true);
         }
@@ -5892,6 +5898,13 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
 
         function updateHeli(dt) {
             if (!heli || !heliMesh) return;
+            // 松手自动悬停(不需要额外按钮):摇杆不动 + 无键盘 → 自动悬停
+            let _mk = (typeof analogMove === 'number' ? analogMove : 0);
+            let _tk = (typeof analogTurn === 'number' ? analogTurn : 0);
+            let _act = Math.abs(_mk) > 0.12 || Math.abs(_tk) > 0.12 || keys.a || keys.d || keys.w || keys.s;
+            autoHover = !_act;
+            if (autoHover && !hoverMode) { hoverMode = true; _hb = document.getElementById('btn-hover'); if (_hb) _hb.style.background = 'rgba(168,255,214,0.35)'; }
+            else if (!autoHover && hoverMode && !hoverManual) { hoverMode = false; _hb = document.getElementById('btn-hover'); if (_hb) _hb.style.background = ''; }
             // ===== 悬停混合(搬自 helicopter1.0)=====
             const hoverTarget = hoverMode ? 1 : 0;
             hoverBlend += (hoverTarget - hoverBlend) * (1 - Math.exp(-HELI_HOVER_BLEND_RATE * dt));
@@ -5981,6 +5994,15 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                 if (!SfxBank.playAt('fx_msl_tank', new THREE.Vector3(heli.x, heli.y, heli.z), 0.85)) SoundManager.playMissileLaunch(new THREE.Vector3(heli.x, heli.y, heli.z), 'fx_msl_tank');
             }
 
+            // 摇杆视觉:不动时回到中心(表示悬停)
+            try {
+                if (joyKnobEl) {
+                    let _mv = (typeof analogMove === 'number' ? analogMove : 0);
+                    let _tv = (typeof analogTurn === 'number' ? analogTurn : 0);
+                    joyKnobEl.style.left = (40 - _tv * 30) + 'px';
+                    joyKnobEl.style.top = (40 + _mv * 30) + 'px';
+                }
+            } catch (e) {}
             // ---- 倒计时 / HUD ----
             heli.timeLeft -= dt;
             if (heli.timeLeft <= 10.5 && heli._warn !== 1) { heli._warn = 1; showKillMessage('武直燃油告急(10 秒)!', false, true); }
@@ -6130,7 +6152,7 @@ if (spec.radius) t.radius = spec.radius;   // 巨型车体(如鼠式)
                         isHeli = true;
                         spawnHeli();
                         setFlightUI(true);
-                        let _je = document.getElementById('joystick-area'); if (_je) _je.style.display = 'none';
+                        // 武直:保留摇杆(左杆=飞行,松手=自动悬停)
                         playVoice('v_air_inbound_' + (1 + Math.floor(Math.random() * 3)), 0);
                         return;
                     }
