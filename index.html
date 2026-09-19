@@ -2322,12 +2322,20 @@
                 gameSettings.treePenetration = (e.target.value === '1');
             });
 
-            document.addEventListener('touchstart', () => {
-                if (!isMobileMode && window.innerWidth <= 900) {
-                    isMobileMode = true;
-                    setupMobileControls();
-                }
-            }, { once: true, passive: true });
+            // 移动端控制:不再依赖"首次触摸"(那次失败会导致所有按钮永久失效)
+            window.__wtInitMobile = function () {
+                if (isMobileMode) return true;
+                if (window.innerWidth > 900 && !('ontouchstart' in window)) return false;
+                isMobileMode = true;
+                try { setupMobileControls(); }
+                catch (err) { console.error('[WT] setupMobileControls 异常:', err); }
+                let mc = document.getElementById('mobile-controls');
+                if (mc) mc.style.display = 'block';
+                return true;
+            };
+            window.__wtInitMobile();                       // 立即初始化
+            document.addEventListener('touchstart', function () { window.__wtInitMobile(); }, { passive: true });
+            window.addEventListener('resize', function () { window.__wtInitMobile(); });
 
             window.addEventListener('resize', onWindowResize);
             document.addEventListener('keydown', e => {
